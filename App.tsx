@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useRef } from 'react';
 import { Content } from "@google/genai";
 import { Message, Sender, Project, ExtractedFile, AnalysisType } from './types';
@@ -20,6 +21,7 @@ const App: React.FC = () => {
   
   // Settings State
   const [apiKey, setApiKey] = useState('');
+  const [modelId, setModelId] = useState('gemini-2.5-flash'); // Default model
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   
   // Refs for scrolling and state access
@@ -30,6 +32,9 @@ const App: React.FC = () => {
   // Refs for persistence (to avoid stale closures during switches)
   const messagesRef = useRef<Message[]>([]);
   const filesRef = useRef<ExtractedFile[]>([]);
+
+  // Ref for aborting requests
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   // -- Effects --
 
@@ -44,6 +49,12 @@ const App: React.FC = () => {
         } else {
           // If no key, open settings automatically
           setIsSettingsOpen(true);
+        }
+
+        // Load Model ID
+        const storedModel = localStorage.getItem('gemini_model_id');
+        if (storedModel) {
+          setModelId(storedModel);
         }
 
         // Load Projects
@@ -74,9 +85,9 @@ const App: React.FC = () => {
 
   // -- Handlers --
 
-  const saveSettings = (newKey: string) => {
-    setApiKey(newKey);
-    localStorage.setItem('gemini_api_key', newKey);
+  const saveSettings = () => {
+    localStorage.setItem('gemini_api_key', apiKey);
+    localStorage.setItem('gemini_model_id', modelId);
     setIsSettingsOpen(false);
   };
 
@@ -315,6 +326,60 @@ const App: React.FC = () => {
     }
   };
 
+  // Helper to format error message
+  const formatError = (error: any): string => {
+    const msg = error?.message || '';
+    if (msg.includes('Aborted') || msg.name === 'AbortError') {
+      return '🛑 生成を中断しました。';
+    }
+    if (msg.includes('429') || msg.includes('Quota') || msg.includes('RESOURCE_EXHAUSTED')) {
+      return '⚠️ API利用制限に達しました。\n設定から「Gemini 2.5 Flash」に切り替えるか、しばらく待ってから再試行してください。';
+    }
+    return `エラーが発生しました: ${msg}`;
+  };
+
+  // Estimate processing time based on context and model
+  const calculateEstimate = (model: string, fileCount: number): string => {
+    const isPro = model.includes('pro');
+    
+    // Base Latency: Flash ~2s, Pro ~5s
+    let minSec = isPro ? 5 : 2;
+    let maxSec = isPro ? 10 : 5;
+
+    // File Factor: ~0.1s per file (Flash), ~0.3s per file (Pro) for prompt processing
+    const fileFactor = isPro ? 0.3 : 0.1;
+    
+    if (fileCount > 0) {
+      const additional = Math.ceil(fileCount * fileFactor);
+      minSec += additional;
+      maxSec += additional * 1.5; // Probing for longer output
+    }
+
+    return `約 ${Math.ceil(minSec)} 〜 ${Math.ceil(maxSec)} 秒`;
+  };
+
+  const stopGeneration = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+      setIsLoading(false);
+      
+      // Update the last message to reflect cancellation
+      setMessages(prev => {
+        const lastMsg = prev[prev.length - 1];
+        if (lastMsg && lastMsg.isThinking) {
+           return prev.map(m => m.id === lastMsg.id ? {
+             ...m,
+             text: '🛑 ユーザーにより中断されました。',
+             isThinking: false,
+             estimatedTime: undefined
+           } : m);
+        }
+        return prev;
+      });
+    }
+  };
+
   const runAnalysis = async (type: AnalysisType) => {
     if (!apiKey) {
       setIsSettingsOpen(true);
@@ -326,8 +391,9 @@ const App: React.FC = () => {
     }
 
     setIsLoading(true);
-    const tempId = crypto.randomUUID();
+    abortControllerRef.current = new AbortController();
     
+    const tempId = crypto.randomUUID();
     let prompt = "";
     let label = "";
 
@@ -349,18 +415,28 @@ const App: React.FC = () => {
         prompt = "プロジェクトの全体的な品質を評価してください。";
     }
 
+    const estimate = calculateEstimate(modelId, extractedFiles.length) + " (解析モード)";
+
     setMessages(prev => [...prev, {
       id: tempId,
-      text: `🔍 ${label}を実行中... (Gemini 3.0 Thinking)`,
+      text: `🔍 ${label}を実行中...`,
       sender: Sender.SYSTEM,
       timestamp: Date.now(),
-      isThinking: true
+      isThinking: true,
+      estimatedTime: estimate
     }]);
 
     try {
       const contextStr = formatContextForPrompt(extractedFiles);
-      const result = await generateStaticAnalysis(apiKey, contextStr, prompt);
+      // Note: Static analysis is not streamed in current implementation, so we can't break mid-stream easily
+      // but we can check signal after result. Ideally service should support signal.
+      // We check abort state after await.
+      const result = await generateStaticAnalysis(apiKey, modelId, contextStr, prompt);
       
+      if (abortControllerRef.current?.signal.aborted) {
+         throw new Error("Aborted");
+      }
+
       if (result) {
         setMessages(prev => {
           const newMsgs = prev.filter(m => m.id !== tempId).concat({
@@ -376,12 +452,13 @@ const App: React.FC = () => {
     } catch (error: any) {
       setMessages(prev => prev.filter(m => m.id !== tempId).concat({
         id: crypto.randomUUID(),
-        text: `エラーが発生しました: ${error.message}`,
+        text: formatError(error),
         sender: Sender.SYSTEM,
         timestamp: Date.now()
       }));
     } finally {
       setIsLoading(false);
+      abortControllerRef.current = null;
     }
   };
 
@@ -402,6 +479,12 @@ const App: React.FC = () => {
     setMessages(prev => [...prev, userMsg]);
     setInput('');
     setIsLoading(true);
+    
+    // Create AbortController
+    abortControllerRef.current = new AbortController();
+
+    // Calculate Estimate
+    const estimate = calculateEstimate(modelId, extractedFiles.length);
 
     try {
       const history: Content[] = messages.map(m => ({
@@ -422,20 +505,30 @@ const App: React.FC = () => {
         text: '',
         sender: Sender.AI,
         timestamp: Date.now(),
-        isThinking: true
+        isThinking: true,
+        estimatedTime: estimate
       }]);
 
-      const streamResponse = await sendMessageStream(apiKey, history, messageToSend);
+      const streamResponse = await sendMessageStream(apiKey, modelId, history, messageToSend);
       
       let fullText = '';
       
       for await (const chunk of streamResponse) {
+        // Check cancellation in loop
+        if (abortControllerRef.current?.signal.aborted) {
+           break; 
+        }
+
         const text = chunk.text || '';
         fullText += text;
         
         setMessages(prev => prev.map(m => 
-          m.id === aiMsgId ? { ...m, text: fullText, isThinking: false } : m
+          m.id === aiMsgId ? { ...m, text: fullText, isThinking: false, estimatedTime: undefined } : m
         ));
+      }
+      
+      if (abortControllerRef.current?.signal.aborted) {
+         throw new Error("Aborted");
       }
       
       setTimeout(() => {
@@ -444,16 +537,22 @@ const App: React.FC = () => {
 
     } catch (error: any) {
       setMessages(prev => {
+          // If error is explicit abort, we might have already handled it or caught here
+          const isAbort = error.message === 'Aborted' || error.name === 'AbortError';
+          
+          // Filter out the empty thinking message if it failed completely (except abort which we want to show as stopped)
           const filtered = prev.filter(m => !(m.sender === Sender.AI && m.text === '' && m.isThinking));
+          
           return [...filtered, {
             id: crypto.randomUUID(),
-            text: `エラー: ${error.message}`,
-            sender: Sender.SYSTEM,
+            text: formatError(error),
+            sender: isAbort ? Sender.AI : Sender.SYSTEM,
             timestamp: Date.now()
           }];
       });
     } finally {
       setIsLoading(false);
+      abortControllerRef.current = null;
     }
   };
 
@@ -506,26 +605,54 @@ const App: React.FC = () => {
               設定
             </h2>
             
-            <div className="mb-4">
-              <label className="block text-sm font-medium text-slate-300 mb-2">
-                Gemini API Key
-              </label>
-              <input 
-                type="password" 
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-                placeholder="AIza..."
-                className="w-full bg-slate-900 border border-slate-600 rounded px-3 py-2 text-white focus:outline-none focus:border-indigo-500 font-mono text-sm"
-              />
-              <p className="text-xs text-slate-500 mt-2">
-                キーはブラウザ内（LocalStorage）にのみ保存されます。<br/>
-                <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-indigo-400 underline">
-                  Google AI Studioでキーを取得
-                </a>
-              </p>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-slate-300 mb-2">
+                  Gemini API Key
+                </label>
+                <input 
+                  type="password" 
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
+                  placeholder="AIza..."
+                  className="w-full bg-slate-900 border border-slate-600 rounded px-3 py-2 text-white focus:outline-none focus:border-indigo-500 font-mono text-sm"
+                />
+                <p className="text-xs text-slate-500 mt-1">
+                  <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-indigo-400 underline">
+                    Google AI Studioでキーを取得
+                  </a>
+                  <span className="ml-2 text-slate-600">※従量課金設定を推奨</span>
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-slate-300 mb-2">
+                  使用モデル
+                </label>
+                <div className="relative">
+                  <select 
+                    value={modelId}
+                    onChange={(e) => setModelId(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-600 rounded px-3 py-2 text-white focus:outline-none focus:border-indigo-500 text-sm appearance-none"
+                  >
+                    <option value="gemini-2.5-flash">Gemini 2.5 Flash (高速・低コスト・推奨)</option>
+                    <option value="gemini-3-pro-preview">Gemini 3.0 Pro (高精度・高コスト)</option>
+                  </select>
+                  <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2 text-slate-400">
+                    <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7"></path>
+                    </svg>
+                  </div>
+                </div>
+                <p className={`text-xs mt-2 leading-relaxed ${modelId.includes('pro') ? 'text-amber-400' : 'text-slate-500'}`}>
+                  {modelId.includes('pro') 
+                    ? '※ ProモデルはFlashの約20〜40倍のコストがかかる場合があります。長時間のチャットや大容量ファイルの解析では、従量課金が高額になる可能性があるためご注意ください。'
+                    : '※ Flashモデルは非常に安価（100万トークン数十円程度）で、日常的な開発支援に最適です。'}
+                </p>
+              </div>
             </div>
 
-            <div className="flex justify-end gap-3 mt-6">
+            <div className="flex justify-end gap-3 mt-8">
                {/* Allow close if key exists */}
               {localStorage.getItem('gemini_api_key') && (
                 <button 
@@ -536,11 +663,11 @@ const App: React.FC = () => {
                 </button>
               )}
               <button 
-                onClick={() => saveSettings(apiKey)}
+                onClick={saveSettings}
                 disabled={!apiKey.trim()}
                 className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-md text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                保存して開始
+                保存
               </button>
             </div>
           </div>
@@ -602,7 +729,7 @@ const App: React.FC = () => {
              <button
                onClick={() => setIsSettingsOpen(true)}
                className="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-full transition-colors"
-               title="設定 (API Key)"
+               title="設定 (API Key / Model)"
              >
                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
@@ -664,17 +791,36 @@ const App: React.FC = () => {
                     )}
                     
                     {msg.isThinking && (
-                       <div className="flex items-center gap-2 mt-2 text-slate-400 text-sm">
-                          <div className="flex gap-1">
-                            <div className="w-1.5 h-1.5 bg-slate-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
-                            <div className="w-1.5 h-1.5 bg-slate-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
-                            <div className="w-1.5 h-1.5 bg-slate-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
+                       <div className="flex items-center justify-between gap-4 mt-2 p-2 bg-slate-900/50 rounded-lg border border-slate-700/50">
+                          <div className="flex flex-col gap-1">
+                             <div className="flex items-center gap-2 text-slate-400 text-sm">
+                                <div className="flex gap-1">
+                                  <div className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
+                                  <div className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
+                                  <div className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
+                                </div>
+                                <span className="animate-pulse font-medium text-indigo-300">AIが思考中...</span>
+                             </div>
+                             {msg.estimatedTime && (
+                               <div className="text-xs text-slate-500 pl-1">
+                                 予測完了時間: {msg.estimatedTime}
+                               </div>
+                             )}
                           </div>
-                          <span className="animate-pulse">AIが思考中...</span>
+                          
+                          <button 
+                            onClick={stopGeneration}
+                            className="flex items-center gap-1 px-2 py-1 bg-red-900/30 hover:bg-red-900/50 border border-red-700/30 text-red-300 text-xs rounded transition-colors"
+                          >
+                            <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" viewBox="0 0 20 20" fill="currentColor">
+                              <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8 7a1 1 0 00-1 1v4a1 1 0 001 1h4a1 1 0 001-1V8a1 1 0 00-1-1H8z" clipRule="evenodd" />
+                            </svg>
+                            停止
+                          </button>
                        </div>
                     )}
 
-                    {msg.sender === Sender.AI && !msg.isThinking && msg.text && (
+                    {msg.sender === Sender.AI && !msg.isThinking && msg.text && !msg.text.includes('中断されました') && (
                       <div className="flex justify-end mt-3 pt-2 border-t border-slate-700/50">
                         <button
                           onClick={() => handleDownloadResponse(msg.text)}
@@ -740,7 +886,7 @@ const App: React.FC = () => {
               />
 
               <textarea
-                className="w-full bg-slate-800 text-slate-200 rounded-xl border border-slate-700 p-3 md:p-4 pl-12 pr-12 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 focus:border-indigo-500 resize-none shadow-lg text-sm md:text-base"
+                className="w-full bg-slate-800 text-slate-200 rounded-xl border border-slate-700 p-3 md:p-4 pl-14 pr-12 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 focus:border-indigo-500 resize-none shadow-lg text-sm md:text-base"
                 rows={1}
                 placeholder={apiKey ? "Laravelについて質問..." : "まずは設定からAPIキーを入力してください"}
                 value={input}

@@ -11,6 +11,7 @@ export interface Message {
   sender: Sender;
   timestamp: number;
   isThinking?: boolean;
+  estimatedTime?: string; // "約 5〜10 秒"
 }
 
 export interface Project {
