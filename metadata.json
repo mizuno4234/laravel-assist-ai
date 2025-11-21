@@ -1,0 +1,5 @@
+{
+  "name": "Laravel Dev Assist AI",
+  "description": "A specialized AI chat assistant for Laravel development. Supports ZIP project analysis, code review, refactoring for simplicity, and unused code detection using Gemini 3.0.",
+  "requestFramePermissions": []
+}
