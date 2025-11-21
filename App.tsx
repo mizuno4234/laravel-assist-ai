@@ -25,6 +25,7 @@ const App: React.FC = () => {
   // Refs for scrolling and state access
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const chatFileInputRef = useRef<HTMLInputElement>(null);
   
   // Refs for persistence (to avoid stale closures during switches)
   const messagesRef = useRef<Message[]>([]);
@@ -273,7 +274,7 @@ const App: React.FC = () => {
       // Update messages
       const successMsg = {
         id: crypto.randomUUID(),
-        text: `✅ 解析完了: ${files.length} 個のファイルを読み込みました。\n\nこれでプロジェクト全体のコンテキストを踏まえたコードレビューや質問が可能です。`,
+        text: `✅ 解析完了: ${files.length} 個のファイルを読み込みました。\n\n以後の質問は、この ${file.name} のコードをベースに回答します。`,
         sender: Sender.SYSTEM,
         timestamp: Date.now()
       };
@@ -289,7 +290,9 @@ const App: React.FC = () => {
       if (projectToSave) {
         const updatedProject = {
           ...projectToSave,
-          name: file.name.replace('.zip', ''),
+          // Only update name if it's the default name or explicitly requested. 
+          // For now, let's keep the project name unless it's "Project X".
+          name: projectToSave.name.startsWith('Project ') ? file.name.replace('.zip', '') : projectToSave.name,
           filesLoadedCount: files.length,
           savedFiles: files,
           savedMessages: [...messages.filter(m => m.id !== loadingMsgId), successMsg] 
@@ -308,6 +311,7 @@ const App: React.FC = () => {
     } finally {
       setIsLoading(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
+      if (chatFileInputRef.current) chatFileInputRef.current.value = '';
     }
   };
 
@@ -607,7 +611,7 @@ const App: React.FC = () => {
              </button>
 
              {currentProjectId && (
-                 <label className={`cursor-pointer flex items-center gap-2 text-xs font-medium px-3 py-1.5 rounded-md transition-colors whitespace-nowrap
+                 <label className={`cursor-pointer flex items-center gap-2 text-xs font-medium px-3 py-1.5 rounded-md transition-colors whitespace-nowrap hidden md:flex
                    ${isLoading ? 'bg-slate-800 text-slate-500 cursor-not-allowed' : 'bg-emerald-600/10 text-emerald-400 hover:bg-emerald-600/20 border border-emerald-600/30'}`}>
                    <input 
                      type="file" 
@@ -620,7 +624,7 @@ const App: React.FC = () => {
                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
                    </svg>
-                   <span className="hidden xs:inline">プロジェクト読込</span>
+                   <span className="hidden lg:inline">プロジェクト読込</span>
                  </label>
              )}
           </div>
@@ -716,8 +720,27 @@ const App: React.FC = () => {
              )}
 
             <div className="max-w-4xl mx-auto relative">
+              <button
+                onClick={() => chatFileInputRef.current?.click()}
+                disabled={isLoading}
+                className="absolute left-3 bottom-3 p-1.5 text-slate-400 hover:text-indigo-400 hover:bg-slate-800 rounded-md transition-colors"
+                title="ZIPファイルを添付"
+              >
+                 <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+                 </svg>
+              </button>
+              <input 
+                 type="file" 
+                 accept=".zip" 
+                 className="hidden" 
+                 ref={chatFileInputRef}
+                 onChange={handleFileUpload}
+                 disabled={isLoading}
+              />
+
               <textarea
-                className="w-full bg-slate-800 text-slate-200 rounded-xl border border-slate-700 p-3 md:p-4 pr-12 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 focus:border-indigo-500 resize-none shadow-lg text-sm md:text-base"
+                className="w-full bg-slate-800 text-slate-200 rounded-xl border border-slate-700 p-3 md:p-4 pl-12 pr-12 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 focus:border-indigo-500 resize-none shadow-lg text-sm md:text-base"
                 rows={1}
                 placeholder={apiKey ? "Laravelについて質問..." : "まずは設定からAPIキーを入力してください"}
                 value={input}
