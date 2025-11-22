@@ -257,6 +257,91 @@ const App: React.FC = () => {
     setIsSidebarOpen(false);
   };
 
+  const handleExportProject = async (id: string) => {
+    // Ensure current project is saved before export if it matches
+    if (id === currentProjectId) {
+      await saveCurrentProjectToDb();
+    }
+
+    // Need to fetch latest from DB or state to get full files/messages
+    // Since we are syncing state with DB on change, `projects` state should be mostly ok, 
+    // but for the active project, `projects` state array might be stale compared to refs/DB.
+    
+    let projectToExport = projects.find(p => p.id === id);
+    if (!projectToExport) return;
+
+    // If exporting currently active project, use current state to be most accurate
+    if (id === currentProjectId) {
+        projectToExport = {
+            ...projectToExport,
+            savedMessages: messagesRef.current,
+            savedFiles: filesRef.current,
+            filesLoadedCount: filesRef.current.length
+        };
+    }
+
+    try {
+      const jsonString = JSON.stringify(projectToExport, null, 2);
+      const blob = new Blob([jsonString], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      
+      const date = new Date();
+      const dateStr = date.toISOString().slice(0, 10); // YYYY-MM-DD
+      const safeName = projectToExport.name.replace(/[^a-z0-9\u3000-\u303f\u3040-\u309f\u30a0-\u30ff\uff00-\uff9f\u4e00-\u9faf\-_]/gi, '_');
+      const filename = `laravel-assist-project-${safeName}-${dateStr}.json`;
+
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error('Export failed', error);
+      alert('エクスポートに失敗しました。');
+    }
+  };
+
+  const handleImportProject = async (file: File) => {
+    try {
+      const text = await file.text();
+      const importedData = JSON.parse(text) as Project;
+
+      // Basic Validation
+      if (!importedData.id || !Array.isArray(importedData.savedMessages)) {
+        throw new Error("無効なプロジェクトファイル形式です。");
+      }
+
+      // Regenerate ID to treat as a new copy (Prevent overwrite of existing if just restoring)
+      const newId = crypto.randomUUID();
+      const newProject: Project = {
+        ...importedData,
+        id: newId,
+        name: `${importedData.name} (インポート)`,
+        createdAt: Date.now() // Update import time
+      };
+
+      await saveProject(newProject);
+      setProjects(prev => [newProject, ...prev]);
+      
+      // Switch to imported project
+      // Save current first
+      await saveCurrentProjectToDb();
+      
+      setCurrentProjectId(newId);
+      setMessages(newProject.savedMessages || []);
+      setExtractedFiles(newProject.savedFiles || []);
+      setIsSidebarOpen(false);
+
+      alert(`プロジェクト「${newProject.name}」を復元しました。`);
+
+    } catch (error) {
+      console.error('Import failed', error);
+      alert('インポートに失敗しました。ファイルが破損しているか形式が異なります。');
+    }
+  };
+
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -696,6 +781,8 @@ const App: React.FC = () => {
           onDeleteProject={handleDeleteProject}
           onRenameProject={handleRenameProject}
           onMergeProjects={handleMergeProjects}
+          onExportProject={handleExportProject}
+          onImportProject={handleImportProject}
         />
       </div>
 
@@ -766,7 +853,7 @@ const App: React.FC = () => {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.384-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
                 </svg>
               </div>
-              <p>左上のメニューからプロジェクトを作成してください</p>
+              <p>左上のメニューからプロジェクトを作成または復元してください</p>
             </div>
           ) : (
             <>

@@ -1,5 +1,5 @@
 
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { Project } from '../types';
 
 interface ProjectListProps {
@@ -10,6 +10,8 @@ interface ProjectListProps {
   onDeleteProject: (id: string) => void;
   onRenameProject: (id: string, newName: string) => void;
   onMergeProjects: (selectedIds: string[], newName: string) => void;
+  onExportProject: (id: string) => void;
+  onImportProject: (file: File) => void;
 }
 
 const ProjectList: React.FC<ProjectListProps> = ({ 
@@ -19,11 +21,14 @@ const ProjectList: React.FC<ProjectListProps> = ({
   onNewProject,
   onDeleteProject,
   onRenameProject,
-  onMergeProjects
+  onMergeProjects,
+  onExportProject,
+  onImportProject
 }) => {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState('');
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  const importInputRef = useRef<HTMLInputElement>(null);
   
   // Merge Modal State
   const [isMergeModalOpen, setIsMergeModalOpen] = useState(false);
@@ -75,6 +80,23 @@ const ProjectList: React.FC<ProjectListProps> = ({
     setDeleteConfirmId(null);
   };
 
+  const handleExportClick = (e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    onExportProject(id);
+  };
+
+  const handleImportClick = () => {
+    importInputRef.current?.click();
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      onImportProject(file);
+    }
+    e.target.value = ''; // Reset
+  };
+
   // Merge Handlers
   const openMergeModal = () => {
     if (projects.length < 2) {
@@ -111,23 +133,44 @@ const ProjectList: React.FC<ProjectListProps> = ({
           新規プロジェクト
         </button>
         
-        <button
-          onClick={openMergeModal}
-          disabled={projects.length < 2}
-          className={`w-full flex items-center justify-center gap-2 bg-slate-800 border border-slate-700 text-slate-300 py-2 px-4 rounded-md text-sm font-medium shadow-sm transition-colors
-            ${projects.length < 2 ? 'opacity-50 cursor-not-allowed' : 'hover:bg-slate-700 hover:text-white'}`}
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
-          </svg>
-          プロジェクト結合
-        </button>
+        <div className="flex gap-2">
+          <button
+            onClick={openMergeModal}
+            disabled={projects.length < 2}
+            className={`flex-1 flex items-center justify-center gap-1 bg-slate-800 border border-slate-700 text-slate-300 py-1.5 px-2 rounded-md text-xs font-medium shadow-sm transition-colors
+              ${projects.length < 2 ? 'opacity-50 cursor-not-allowed' : 'hover:bg-slate-700 hover:text-white'}`}
+            title="プロジェクト結合"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+            </svg>
+            結合
+          </button>
+          
+          <button
+            onClick={handleImportClick}
+            className="flex-1 flex items-center justify-center gap-1 bg-slate-800 border border-slate-700 text-slate-300 py-1.5 px-2 rounded-md text-xs font-medium shadow-sm transition-colors hover:bg-slate-700 hover:text-white"
+            title="JSONからインポート"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+            </svg>
+            復元
+          </button>
+          <input 
+            type="file" 
+            accept=".json" 
+            ref={importInputRef} 
+            className="hidden" 
+            onChange={handleFileChange}
+          />
+        </div>
       </div>
       
       <div className="flex-1 overflow-y-auto p-2 space-y-1">
         {projects.length === 0 && (
           <div className="text-slate-500 text-xs text-center mt-8 px-4 leading-relaxed">
-            プロジェクトがありません。<br/>新規作成してください。
+            プロジェクトがありません。<br/>新規作成または復元してください。
           </div>
         )}
         
@@ -200,10 +243,19 @@ const ProjectList: React.FC<ProjectListProps> = ({
               </button>
 
               {/* Action Buttons */}
-              <div className="flex items-center pr-1 z-10 shrink-0">
+              <div className="flex items-center pr-1 z-10 shrink-0 gap-0.5">
+                 <button
+                  onClick={(e) => handleExportClick(e, project.id)}
+                  className="p-1.5 text-slate-500 hover:text-emerald-400 hover:bg-slate-700/50 rounded transition-colors"
+                  title="エクスポート"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4-4m0 0l-4-4m4 4h12" transform="rotate(180 12 12)" />
+                  </svg>
+                </button>
                 <button
                   onClick={(e) => startEdit(e, project)}
-                  className="p-2 text-slate-500 hover:text-indigo-400 hover:bg-slate-700/50 rounded transition-colors"
+                  className="p-1.5 text-slate-500 hover:text-indigo-400 hover:bg-slate-700/50 rounded transition-colors"
                   title="名前を変更"
                 >
                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -212,7 +264,7 @@ const ProjectList: React.FC<ProjectListProps> = ({
                 </button>
                 <button
                   onClick={(e) => handleDeleteClick(e, project)}
-                  className="p-2 text-slate-500 hover:text-red-400 hover:bg-slate-700/50 rounded transition-colors"
+                  className="p-1.5 text-slate-500 hover:text-red-400 hover:bg-slate-700/50 rounded transition-colors"
                   title="削除"
                 >
                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
